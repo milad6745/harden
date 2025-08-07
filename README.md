@@ -1,9 +1,8 @@
-البته! این هم فایل کامل `README.md` آماده برای پروژه شما:
 
 ```markdown
 # Ansible Inventory and Usage Guide
 
-این پروژه شامل فایل `inventory` برای مدیریت سرورها و توضیحات نحوه افزودن هاست جدید و اجرای playbookها با انسیبل است.
+این پروژه شامل فایل inventory برای مدیریت سرورها و توضیحات نحوه افزودن هاست جدید و اجرای playbookها با انسیبل است.
 
 ---
 
@@ -13,7 +12,8 @@
 
 ### نمونه فایل inventory:
 
-```
+
+
 
 localhost ansible\_connection=local
 
