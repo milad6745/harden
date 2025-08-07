@@ -1,5 +1,5 @@
 
-```markdown
+
 # Ansible Inventory and Usage Guide
 
 این پروژه شامل فایل inventory برای مدیریت سرورها و توضیحات نحوه افزودن هاست جدید و اجرای playbookها با انسیبل است.
@@ -14,7 +14,7 @@
 
 
 
-
+```
 localhost ansible\_connection=local
 
 webserver1 ansible\_host=192.168.1.50 ansible\_user=milad
