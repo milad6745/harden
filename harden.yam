@@ -1,0 +1,158 @@
+- name: Check OS and Nginx Hardening (JSON Report)
+  hosts: localhost
+  become: yes
+  gather_facts: yes
+
+  vars:
+    report_file: /tmp/hardening_report.json
+    ssl_cert_path: /etc/nginx/ssl/nginx.crt   # مسیر گواهی SSL خود را تنظیم کنید
+
+  pre_tasks:
+    - name: پاک‌سازی گزارش قبلی
+      file:
+        path: "{{ report_file }}"
+        state: absent
+
+  tasks:
+    - name: چک فعال بودن فایروال (ufw)
+      shell: ufw status | grep -i "Status"
+      register: ufw_status
+      ignore_errors: yes
+
+    - name: چک غیرفعال بودن ورود root از طریق SSH
+      shell: grep '^PermitRootLogin' /etc/ssh/sshd_config
+      register: ssh_root_login
+      ignore_errors: yes
+
+    - name: چک غیرفعال بودن Password Authentication در SSH
+      shell: grep '^PasswordAuthentication' /etc/ssh/sshd_config
+      register: ssh_password_auth
+      ignore_errors: yes
+
+    - name: چک فعال بودن AppArmor
+      shell: aa-status | grep -i "profiles are loaded"
+      register: apparmor_status
+      ignore_errors: yes
+
+    - name: چک فعال بودن بروزرسانی خودکار
+      stat:
+        path: /etc/apt/apt.conf.d/20auto-upgrades
+      register: auto_upgrades_file
+
+    - name: بررسی نصب بودن Nginx
+      shell: nginx -v
+      register: nginx_check
+      ignore_errors: yes
+
+    - name: بررسی پارامترهای امنیتی Nginx (فقط اگر نصب باشد)
+      shell: "grep -E '{{ item.pattern }}' /etc/nginx/nginx.conf"
+      register: nginx_result
+      ignore_errors: yes
+      loop:
+        - { name: "server_tokens", pattern: "server_tokens\\s+off;" }
+        - { name: "X-Frame-Options", pattern: "add_header\\s+X-Frame-Options\\s+\\\"SAMEORIGIN\\\";" }
+        - { name: "X-Content-Type-Options", pattern: "add_header\\s+X-Content-Type-Options\\s+\\\"nosniff\\\";" }
+        - { name: "Strict-Transport-Security", pattern: "add_header\\s+Strict-Transport-Security" }
+        - { name: "Content-Security-Policy", pattern: "add_header\\s+Content-Security-Policy" }
+      when: nginx_check.rc == 0
+
+    - name: مقداردهی اولیه nginx_hardening به دیکشنری خالی
+      set_fact:
+        nginx_hardening: {}
+
+    - name: پر کردن nginx_hardening از نتایج چک nginx
+      set_fact:
+        nginx_hardening: "{{ nginx_hardening | combine({item.item.name: ('OK' if item.rc == 0 else 'Missing')}) }}"
+      loop: "{{ nginx_result.results }}"
+      when: nginx_check.rc == 0
+
+    - name: اگر nginx نصب نبود مقداردهی nginx_hardening به Not Installed
+      set_fact:
+        nginx_hardening: "Not Installed"
+      when: nginx_check.rc != 0
+
+    # --- بخش اضافه شده برای چک SSL و Self-Signed ---
+
+    - name: چک وجود فایل گواهی SSL
+      stat:
+        path: "{{ ssl_cert_path }}"
+      register: ssl_cert_file
+      when: nginx_check.rc == 0
+
+    - name: استخراج اطلاعات گواهی SSL
+      shell: "openssl x509 -in {{ ssl_cert_path }} -noout -text"
+      register: ssl_cert_info
+      when:
+        - nginx_check.rc == 0
+        - ssl_cert_file.stat.exists
+
+    - name: بررسی Self-Signed بودن گواهی SSL
+      shell: |
+        openssl x509 -in {{ ssl_cert_path }} -noout -issuer -subject | \
+        awk -F'=' '/issuer=|subject=/{print $2}' | uniq | wc -l
+      register: ssl_self_signed_check
+      when:
+        - nginx_check.rc == 0
+        - ssl_cert_file.stat.exists
+
+    - name: تعیین وضعیت Self-Signed بودن
+      set_fact:
+        ssl_self_signed: "{{ 'Yes' if ssl_self_signed_check.stdout|int == 1 else 'No' }}"
+      when:
+        - nginx_check.rc == 0
+        - ssl_cert_file.stat.exists
+
+    - name: چک اعتبار تاریخ گواهی SSL (validity date)
+      shell: "openssl x509 -in {{ ssl_cert_path }} -noout -dates"
+      register: ssl_cert_dates
+      when:
+        - nginx_check.rc == 0
+        - ssl_cert_file.stat.exists
+
+    - name: تعیین وضعیت اعتبار گواهی SSL
+      set_fact:
+        ssl_valid: >-
+          {% set not_before = (ssl_cert_dates.stdout_lines | select('search', '^notBefore=') | list).0.split('=')[1] %}
+          {% set not_after = (ssl_cert_dates.stdout_lines | select('search', '^notAfter=') | list).0.split('=')[1] %}
+          {% set nb = not_before | to_datetime('%b %d %H:%M:%S %Y %Z') %}
+          {% set na = not_after | to_datetime('%b %d %H:%M:%S %Y %Z') %}
+          {% if (nb <= ansible_date_time.iso8601 | to_datetime) and (na >= ansible_date_time.iso8601 | to_datetime) %}Valid{% else %}Expired{% endif %}
+      when:
+        - nginx_check.rc == 0
+        - ssl_cert_file.stat.exists
+
+    - name: اضافه کردن اطلاعات SSL به nginx_hardening
+      set_fact:
+        nginx_hardening: >-
+          {{
+            nginx_hardening | combine({
+              'SSL Certificate': (ssl_cert_file.stat.exists | ternary('Present', 'Missing')),
+              'Self-Signed': ssl_self_signed | default('N/A'),
+              'SSL Validity': ssl_valid | default('N/A')
+            })
+          }}
+      when: nginx_check.rc == 0
+
+    - name: گرفتن IP آدرس localhost
+      set_fact:
+        host_ip: "{{ ansible_default_ipv4.address | default('127.0.0.1') }}"
+
+    - name: ساخت گزارش به صورت JSON (با IP میزبان)
+      set_fact:
+        report_data:
+          host_ip: "{{ host_ip }}"
+          firewall: "{{ 'OK' if 'active' in (ufw_status.stdout | default('') | lower) else 'Not Active/Installed' }}"
+          ssh_root_login: "{{ 'Disabled' if 'no' in (ssh_root_login.stdout | default('')) else 'Enabled/Not Set' }}"
+          ssh_password_auth: "{{ 'Disabled' if 'no' in (ssh_password_auth.stdout | default('')) else 'Enabled/Not Set' }}"
+          apparmor: "{{ 'Enabled' if apparmor_status.rc == 0 else 'Disabled/Not Installed' }}"
+          auto_updates: "{{ 'Enabled' if auto_upgrades_file.stat.exists else 'Not Configured' }}"
+          nginx: "{{ nginx_hardening }}"
+
+    - name: ذخیره گزارش JSON
+      copy:
+        dest: "{{ report_file }}"
+        content: "{{ report_data | to_nice_json }}"
+
+    - name: نمایش خروجی JSON
+      debug:
+        msg: "{{ report_data | to_nice_json }}"
